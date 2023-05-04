@@ -1,0 +1,149 @@
+#include <opencv2/opencv.hpp>
+#include <iostream>
+
+using namespace std;
+using namespace cv;
+
+// CUDA kernel for detecting faces
+__global__ void detectFaces(const cuda::PtrStepSz<uchar> grayFrame, cuda::Rect* d_faces, int* d_numFaces)
+{
+    // Get the x and y coordinates of the current thread
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Make sure the current thread is within the image boundaries
+    if (x < grayFrame.cols && y < grayFrame.rows)
+    {
+        // Calculate the index of the current pixel
+        int i = y * grayFrame.cols + x;
+
+        // Check if the current pixel is part of a face
+        if (grayFrame.ptr()[i] > 80)
+        {
+            // Add the face to the list of faces
+            int numFaces = atomicAdd(d_numFaces, 1);
+            d_faces[numFaces] = cuda::Rect(x, y, 30, 30);
+        }
+    }
+}
+
+// CUDA kernel for detecting masks
+__global__ void detectMasks(const cuda::PtrStepSz<uchar> grayFace, const cuda::Rect* d_faces, int* d_numMasks, cuda::Rect* d_masks)
+{
+    // Get the x and y coordinates of the current thread
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Make sure the current thread is within the image boundaries
+    if (x < grayFace.cols && y < grayFace.rows)
+    {
+        // Calculate the index of the current pixel
+        int i = y * grayFace.cols + x;
+
+        // Check if the current pixel is part of a mask
+        if (grayFace.ptr()[i] > 80)
+        {
+            // Add the mask to the list of masks
+            int numMasks = atomicAdd(d_numMasks, 1);
+            d_masks[numMasks] = cuda::Rect(d_faces[0].x + x, d_faces[0].y + y, 20, 20);
+        }
+    }
+}
+
+int main(int argc, char** argv)
+{
+    // Load the cascade classifier for face detection
+    CascadeClassifier faceCascade;
+    faceCascade.load("haarcascade_frontalface_alt.xml");
+
+    // Load the cascade classifier for mask detection
+    CascadeClassifier maskCascade;
+    maskCascade.load("haarcascade_mask.xml");
+
+    // Open the default camera
+    VideoCapture cap(0);
+
+    // Check if the camera is opened successfully
+    if (!cap.isOpened())
+    {
+        cout << "Error opening camera" << endl;
+        return -1;
+    }
+
+    // Create a window to display the camera output
+    namedWindow("Face Mask Detection", WINDOW_NORMAL);
+
+    while (true)
+    {
+        // Read a frame from the camera
+        Mat frame;
+        cap.read(frame);
+
+        // Convert the frame to grayscale
+        cuda::GpuMat d_grayFrame;
+        cuda::cvtColor(cuda::GpuMat(frame), d_grayFrame, COLOR_BGR2GRAY);
+
+        // Allocate memory for the list of faces and the number of faces
+        const int maxFaces = 100;
+        cuda::Rect* d_faces;
+        cudaMalloc(&d_faces, maxFaces * sizeof(cuda::Rect));
+        int* d_numFaces;
+        cudaMalloc(&d_numFaces, sizeof(int));
+        cudaMemset(d_numFaces, 0,sizeof(int));
+
+    // Set the size of the CUDA grid and block
+    blockSize = dim3(16, 16);
+    gridSize = dim3((faces[0].width + blockSize.x - 1) / blockSize.x, (faces[0].height + blockSize.y - 1) / blockSize.y);
+
+    // Call the kernel for detecting masks
+    detectMasks<<<gridSize, blockSize>>>(d_grayFrame(faces[0]), d_faces, d_numMasks, d_masks);
+
+    // Copy the detected masks from the device memory to the host memory
+    int numMasks = 0;
+    cudaError_t err = cudaMemcpy(&numMasks, d_numMasks, sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess)
+    {
+        cout << "Error copying number of masks from device to host" << endl;
+        return -1;
+    }
+
+    vector<Rect> masks(numMasks);
+    err = cudaMemcpy(masks.data(), d_masks, numMasks * sizeof(cuda::Rect), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess)
+    {
+        cout << "Error copying masks from device to host" << endl;
+        return -1;
+    }
+
+    // Draw the detected faces and masks on the frame
+    for (const auto& face : faces)
+    {
+        rectangle(frame, face, Scalar(255, 0, 0), 2);
+    }
+
+    for (const auto& mask : masks)
+    {
+        rectangle(frame, mask, Scalar(0, 255, 0), 2);
+    }
+
+    // Display the frame
+    imshow("Face Mask Detection", frame);
+
+    // Check if the user has pressed the 'q' key
+    if (waitKey(1) == 'q')
+    {
+        break;
+    }
+
+    // Free the device memory
+    cudaFree(d_faces);
+    cudaFree(d_numFaces);
+    cudaFree(d_masks);
+    cudaFree(d_numMasks);
+}
+
+// Release the camera and destroy the window
+cap.release();
+destroyAllWindows();
+
+return 0;
