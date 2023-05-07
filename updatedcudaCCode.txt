@@ -21,7 +21,7 @@ __global__ void detectFaces(const cuda::PtrStepSz<uchar> grayFrame, cuda::Rect* 
         if (grayFrame.ptr()[i] > 80)
         {
             // Add the face to the list of faces
-            int numFaces = atomicAdd(d_numFaces, 1);
+            int numFaces = atomicAdd(d_numFaces, 1);  //here I tried changinf number of faces to the nmbers stated in the table
             d_faces[numFaces] = cuda::Rect(x, y, 30, 30);
         }
     }
